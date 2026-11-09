@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "implementation": "real_CoreGraphics_virtual_display_not_image_resampling",
+  "runtime_verified": false,
+  "upstream": {
+    "project": "Chromium",
+    "commit": "6edb0f5674667e864e4d92cc70c8b8457b5a54fa",
+    "source_url": "https://chromium.googlesource.com/chromium/src/+/6edb0f5674667e864e4d92cc70c8b8457b5a54fa/ui/display/mac/test/virtual_display_util_mac.mm",
+    "source_sha256": "4823b56c2e05bd03fcb1d06a89fb36530b774674c4089e6bd661e6ad32dee97e",
+    "source_blob_sha1": "37e96927d1a2f68d2ee57797710520a790193c82",
+    "license": "BSD-3-Clause",
+    "license_url": "https://chromium.googlesource.com/chromium/src/+/6edb0f5674667e864e4d92cc70c8b8457b5a54fa/LICENSE",
+    "license_sha256": "368cca1106be99d39ecd32a38d8305585d802a475effb66380b91ffc9bcf709b"
+  },
+  "adaptation": "Private CGVirtualDisplay declarations and descriptor/settings creation adapted; Chromium dependencies/logging removed. Added bounded owned lifetime and native probe/Telegram-only AX placement.",
+  "requested": {
+    "pixels": [
+      3840,
+      2160
+    ],
+    "points": [
+      1920,
+      1080
+    ],
+    "scale": 2
+  },
+  "limitations": [
+    "Private Apple API; no successful runtime claim before native probe.",
+    "Never change existing display modes or mirror displays.",
+    "Largest window is a bootstrap placement selector, not a privacy-safe capture selector."
+  ]
+}

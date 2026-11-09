@@ -1,0 +1,42 @@
+name: Private native macOS test-account capture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-capture-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  private-native-session:
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.actor == github.repository_owner
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Read reviewed native tools
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: verification/native-macos-capture
+          fetch-depth: 1
+
+      - name: Open signed native application without an account
+        shell: bash
+        run: bash verification/native-macos-capture/capture.sh
+
+      - name: Transfer actual application frames over encrypted private transport
+        shell: bash
+        env:
+          NATIVE_SESSION_KEY: ${{ secrets.NATIVE_SESSION_KEY }}
+          NATIVE_SESSION_AUTH: ${{ secrets.NATIVE_SESSION_AUTH }}
+          NATIVE_SESSION_ENDPOINT: ${{ secrets.NATIVE_SESSION_ENDPOINT }}
+          NATIVE_TARGET_BOT: ${{ secrets.NATIVE_TARGET_BOT }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/native-macos-capture/work"
+          source verification/native-macos-capture/interactive-session/mac/display/prepare-display.sh "$work/Telegram.app" "$work/display"
+          trap native_display_cleanup EXIT INT TERM
+          node verification/native-macos-capture/interactive-session/mac/native-session-client.mjs
