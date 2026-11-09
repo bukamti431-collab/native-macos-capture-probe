@@ -1,0 +1,32 @@
+name: Public native macOS application diagnostic (no login)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-capture-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  native-capture:
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.actor == github.repository_owner
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Read capture tools
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: verification/native-macos-capture
+          fetch-depth: 1
+
+      - name: Capture genuine unauthenticated application pixels
+        shell: bash
+        run: bash verification/native-macos-capture/capture.sh
+
+      - name: Emit bounded diagnostic files in normal job logs
+        shell: bash
+        run: python3 -B verification/native-macos-capture/emit_diagnostics.py
