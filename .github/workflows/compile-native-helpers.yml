@@ -1,0 +1,26 @@
+name: Native helper compiler diagnostic (no Telegram or account)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile-native-helpers:
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.actor == github.repository_owner
+    runs-on: macos-26
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          sparse-checkout: verification/native-macos-capture/interactive-session/mac/display
+      - name: Compile public display source against actual Apple SDK
+        shell: bash
+        run: |
+          set +e
+          source_dir=verification/native-macos-capture/interactive-session/mac/display
+          xcrun clang -fobjc-arc -fblocks -Wall -Wextra -framework AppKit -framework CoreGraphics -framework Foundation "$source_dir/virtual-display.m" -o "$RUNNER_TEMP/virtual-display"
+          first=$?
+          xcrun clang -fobjc-arc -fblocks -Wall -Wextra -framework AppKit -framework ApplicationServices -framework CoreGraphics "$source_dir/native-display.m" -o "$RUNNER_TEMP/native-display"
+          second=$?
+          printf 'Display compiler exit codes: %s %s\n' "$first" "$second"
+          if [[ "$first" == 0 && "$second" == 0 ]]; then "$RUNNER_TEMP/native-display" probe; else exit 1; fi
