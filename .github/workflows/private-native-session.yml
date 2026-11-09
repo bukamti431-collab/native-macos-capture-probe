@@ -14,7 +14,7 @@ jobs:
   private-native-session:
     if: github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.actor == github.repository_owner
     runs-on: macos-26
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Read reviewed native tools
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -28,6 +28,7 @@ jobs:
         run: |
           bash verification/native-macos-capture/capture.sh
           xcrun swiftc -O verification/native-macos-capture/interactive-session/mac/auth_input.swift -o "$RUNNER_TEMP/native-macos-capture/work/auth_input"
+          xcrun swiftc -O verification/native-macos-capture/interactive-session/mac/native_ui.swift -o "$RUNNER_TEMP/native-macos-capture/work/native_ui"
 
       - name: Transfer actual application frames over encrypted private transport
         shell: bash
@@ -37,6 +38,7 @@ jobs:
           NATIVE_SESSION_ENDPOINT: ${{ secrets.NATIVE_SESSION_ENDPOINT }}
           NATIVE_TARGET_BOT: ${{ secrets.NATIVE_TARGET_BOT }}
           NATIVE_TELEGRAM_PASSWORD: ${{ secrets.NATIVE_TELEGRAM_PASSWORD }}
+          NATIVE_FILTER_TARGET: 'true'
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/native-macos-capture/work"

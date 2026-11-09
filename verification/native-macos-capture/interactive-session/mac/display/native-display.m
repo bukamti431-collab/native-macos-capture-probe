@@ -143,8 +143,13 @@ static int Place(int argc, const char *argv[]) {
     if (!movable || !resizable) { CFRelease(rawWindows); return Fail(@"telegram_window_not_resizable"); }
     // AppKit uses bottom-left screen coordinates; AX and CGWindow use top-left.
     NSRect visible = screen.visibleFrame;
-    CGRect requested = CGRectMake(visible.origin.x + 8, NSMaxY(main.frame) - NSMaxY(visible) + 8,
-                                   visible.size.width - 16, visible.size.height - 16);
+    // A real window at presentation scale keeps the native text readable.
+    // Pixel density remains the actual display's; no image enlargement occurs.
+    CGFloat requestedWidth = MIN(1100, visible.size.width - 16);
+    CGFloat requestedHeight = MIN(712, visible.size.height - 16);
+    CGRect requested = CGRectMake(visible.origin.x + (visible.size.width - requestedWidth) / 2,
+                                   NSMaxY(main.frame) - NSMaxY(visible) + (visible.size.height - requestedHeight) / 2,
+                                   requestedWidth, requestedHeight);
     if (requested.size.width < 400 || requested.size.height < 400) { CFRelease(rawWindows); return Fail(@"target_display_too_small"); }
     CGPoint point = requested.origin; CGSize size = requested.size;
     AXValueRef positionValue = AXValueCreate(kAXValueCGPointType, &point), sizeValue = AXValueCreate(kAXValueCGSizeType, &size);

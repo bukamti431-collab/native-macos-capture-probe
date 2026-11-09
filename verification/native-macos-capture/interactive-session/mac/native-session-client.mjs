@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
 const AAD = Buffer.from('native-macos-session-v1', 'utf8');
-const MAX_DURATION_MS = 8 * 60_000;
+const MAX_DURATION_MS = 12 * 60_000;
 const MAX_PNG_BYTES = 6 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES = 12 * 1024 * 1024;
 const BUNDLE = 'ru.keepcoder.Telegram';
@@ -47,7 +47,9 @@ export function loadConfiguration(env) {
     requireValue(typeof env.NATIVE_TARGET_BOT === 'string' && /^[A-Za-z0-9_]{5,32}$/.test(env.NATIVE_TARGET_BOT));
     const telegramPassword = env.NATIVE_TELEGRAM_PASSWORD === '' ? undefined : env.NATIVE_TELEGRAM_PASSWORD;
     requireValue(telegramPassword === undefined || validPassword(telegramPassword));
+    requireValue(env.NATIVE_FILTER_TARGET === undefined || env.NATIVE_FILTER_TARGET === '' || ['true', 'false'].includes(env.NATIVE_FILTER_TARGET));
     return { key, auth, origin: endpoint.origin, targetBot: env.NATIVE_TARGET_BOT, telegramPassword, displayId: displayIdentifier(env.NATIVE_DISPLAY_ID),
+      filterTarget: env.NATIVE_FILTER_TARGET === 'true',
       intervalMs: 5000, durationMs: MAX_DURATION_MS, httpTimeoutMs: 4000, nativeTimeoutMs: 4000,
       maxConsecutiveFailures: 3, retryDelayMs: 100 };
   } catch { throw new SessionError('invalid_configuration'); }
@@ -142,7 +144,7 @@ export async function runSession(config, { nativeAdapter, fetchImpl = globalThis
   const deadline = performance.now() + Math.min(config.durationMs, MAX_DURATION_MS);
   const remaining = () => Math.max(0, deadline - performance.now());
   let seq = 0, frames = 0, failures = 0, targetOpened = false, state = 'awaiting_user';
-  let passwordAttempted = false, nativeAuthStatus;
+  let passwordAttempted = false, nativeAuthStatus, filterAttempted = false, nativeFilterStatus;
   const event = value => { try { onEvent(value); } catch {} };
   const nativeOperation = async operation => {
     const controller = new AbortController();
@@ -155,7 +157,9 @@ export async function runSession(config, { nativeAdapter, fetchImpl = globalThis
       const capture = await nativeOperation(signal => nativeAdapter.captureFrame({ signal }));
       capture.window_probe = { ...capture.window_probe };
       delete capture.window_probe.native_auth_status;
+      delete capture.window_probe.native_filter_status;
       if (nativeAuthStatus) capture.window_probe.native_auth_status = nativeAuthStatus;
+      if (nativeFilterStatus) capture.window_probe.native_filter_status = nativeFilterStatus;
       const frame = framePayload(capture, ++seq, state);
       const body = JSON.stringify(encryptPayload(frame, config.key));
       requireValue(Buffer.byteLength(body) <= MAX_ENVELOPE_BYTES, 'native_unavailable');
@@ -177,6 +181,17 @@ export async function runSession(config, { nativeAdapter, fetchImpl = globalThis
           else if (status === 'submitted') { nativeAuthStatus = 'submitted'; event({ event: 'password_submitted' }); }
           else event({ event: 'password_entry_unavailable' });
         } catch { event({ event: 'password_entry_unavailable' }); }
+      }
+      if (config.filterTarget === true && targetOpened && !filterAttempted
+        && (config.telegramPassword === undefined || nativeAuthStatus === 'submitted')) {
+        filterAttempted = true; // An uncertain UI action must never be repeated.
+        nativeFilterStatus = 'unavailable';
+        try {
+          requireValue(Number.isSafeInteger(capture.window_probe.target_pid) && capture.window_probe.target_pid > 0, 'native_unavailable');
+          const status = await nativeOperation(signal => nativeAdapter.filterTarget(capture.window_probe.target_pid, config.targetBot, { signal }));
+          if (status === 'filtered') { nativeFilterStatus = 'filtered'; event({ event: 'filter_applied' }); }
+          else event({ event: 'filter_unavailable' });
+        } catch { event({ event: 'filter_unavailable' }); }
       }
       if (command.action === 'open_target' && !targetOpened) {
         category = 'native_unavailable';
@@ -217,6 +232,16 @@ export function nativeChildEnvironment(env) {
   return Object.fromEntries(Object.keys(env).filter(name => !name.startsWith('NATIVE_')).map(name => [name, env[name]]));
 }
 
+export async function filterTargetUsingHelper({ app, pid, target, filterHelper, invoke, verifyHelper, signal }) {
+  try {
+    requireValue(Number.isSafeInteger(pid) && pid > 0 && typeof target === 'string' && /^[A-Za-z0-9_]{5,32}$/.test(target), 'native_unavailable');
+    await verifyHelper();
+    const output = await invoke(filterHelper, [app, String(pid), 'filter-target'], signal, JSON.stringify({ target }));
+    const result = JSON.parse(output.stdout);
+    return result?.filtered === true ? 'filtered' : 'unavailable';
+  } catch { return 'unavailable'; }
+}
+
 export function createWindowPlacement({ app, displayId, displayHelper, verifyHelper, invoke, inspect }) {
   requireValue(displayId === undefined || (Number.isInteger(displayId) && displayId > 0 && displayId <= 0xffffffff));
   const attempted = new Set();
@@ -246,6 +271,7 @@ export async function createNativeAdapter(env) {
   const work = path.join(await realpath(env.RUNNER_TEMP), 'native-macos-capture', 'work');
   const app = path.join(work, 'Telegram.app'), helper = path.join(work, 'window_probe'), screenshot = path.join(work, 'private-session-window.png');
   const authHelper = path.join(work, 'auth_input');
+  const filterHelper = path.join(work, 'native_ui');
   const displayHelper = path.join(work, 'display', 'native-display'), displayId = displayIdentifier(env.NATIVE_DISPLAY_ID);
   const childEnvironment = nativeChildEnvironment(env);
   for (const item of [work, app, helper]) requireValue(await realpath(item) === item, 'native_unavailable');
@@ -286,6 +312,10 @@ export async function createNativeAdapter(env) {
     async submitPasswordIfVisible(pid, password, { signal } = {}) {
       return submitPasswordUsingHelper({ app, pid, password, authHelper, invoke, signal,
         verifyHelper: async () => requireValue(await realpath(authHelper) === authHelper && (await lstat(authHelper)).isFile(), 'native_unavailable') });
+    },
+    async filterTarget(pid, target, { signal } = {}) {
+      return filterTargetUsingHelper({ app, pid, target, filterHelper, invoke, signal,
+        verifyHelper: async () => requireValue(await realpath(filterHelper) === filterHelper && (await lstat(filterHelper)).isFile(), 'native_unavailable') });
     }
   };
 }
