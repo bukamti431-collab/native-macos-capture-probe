@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-          sparse-checkout: verification/native-macos-capture/interactive-session/mac/display
+          sparse-checkout: verification/native-macos-capture
       - name: Compile public display source against actual Apple SDK
         shell: bash
         run: |
@@ -22,5 +22,18 @@ jobs:
           first=$?
           xcrun clang -fobjc-arc -fblocks -Wall -Wextra -framework AppKit -framework ApplicationServices -framework CoreGraphics "$source_dir/native-display.m" -o "$RUNNER_TEMP/native-display"
           second=$?
-          printf 'Display compiler exit codes: %s %s\n' "$first" "$second"
-          if [[ "$first" == 0 && "$second" == 0 ]]; then "$RUNNER_TEMP/native-display" probe; else exit 1; fi
+          xcrun swiftc -O verification/native-macos-capture/interactive-session/mac/auth_input.swift -o "$RUNNER_TEMP/auth_input"
+          third=$?
+          printf 'Native compiler exit codes: %s %s %s\n' "$first" "$second" "$third"
+          if [[ "$first" == 0 && "$second" == 0 && "$third" == 0 ]]; then "$RUNNER_TEMP/native-display" probe; else exit 1; fi
+      - name: Check native permissions and display without an account
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash verification/native-macos-capture/capture.sh
+          work="$RUNNER_TEMP/native-macos-capture/work"
+          source verification/native-macos-capture/interactive-session/mac/display/prepare-display.sh "$work/Telegram.app" "$work/display"
+          trap native_display_cleanup EXIT INT TERM
+          "$work/window_probe" "$work/Telegram.app" inspect
+          pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["target_pid"])' "$RUNNER_TEMP/native-macos-capture/artifacts/window-probe.json")"
+          "$RUNNER_TEMP/auth_input" "$work/Telegram.app" "$pid" probe

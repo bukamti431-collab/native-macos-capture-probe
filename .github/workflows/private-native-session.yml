@@ -25,7 +25,9 @@ jobs:
 
       - name: Open signed native application without an account
         shell: bash
-        run: bash verification/native-macos-capture/capture.sh
+        run: |
+          bash verification/native-macos-capture/capture.sh
+          xcrun swiftc -O verification/native-macos-capture/interactive-session/mac/auth_input.swift -o "$RUNNER_TEMP/native-macos-capture/work/auth_input"
 
       - name: Transfer actual application frames over encrypted private transport
         shell: bash
@@ -34,6 +36,7 @@ jobs:
           NATIVE_SESSION_AUTH: ${{ secrets.NATIVE_SESSION_AUTH }}
           NATIVE_SESSION_ENDPOINT: ${{ secrets.NATIVE_SESSION_ENDPOINT }}
           NATIVE_TARGET_BOT: ${{ secrets.NATIVE_TARGET_BOT }}
+          NATIVE_TELEGRAM_PASSWORD: ${{ secrets.NATIVE_TELEGRAM_PASSWORD }}
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/native-macos-capture/work"

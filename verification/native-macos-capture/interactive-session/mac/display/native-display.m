@@ -5,7 +5,7 @@
 #include <math.h>
 #include <unistd.h>
 
-static NSArray *Rect(CGRect r) { return @[@(r.origin.x), @(r.origin.y), @(r.size.width), @(r.size.height)]; }
+static NSArray *NativeRectArray(CGRect r) { return @[@(r.origin.x), @(r.origin.y), @(r.size.width), @(r.size.height)]; }
 static int Emit(NSDictionary *value, int code) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:value options:NSJSONWritingSortedKeys error:NULL];
     if (data) { fwrite(data.bytes, 1, data.length, stdout); fputc('\n', stdout); }
@@ -71,7 +71,7 @@ static int Probe(void) {
             @"vendor_number": @(CGDisplayVendorNumber(displayID)),
             @"online": @(CGDisplayIsOnline(displayID) != 0), @"active": @(CGDisplayIsActive(displayID) != 0),
             @"mirrored": @(CGDisplayIsInMirrorSet(displayID) != 0),
-            @"bounds_points": Rect(CGDisplayBounds(displayID)),
+            @"bounds_points": NativeRectArray(CGDisplayBounds(displayID)),
             @"framebuffer_pixels": @[@(CGDisplayPixelsWide(displayID)), @(CGDisplayPixelsHigh(displayID))]
         } mutableCopy];
         if (mode) {
@@ -80,8 +80,8 @@ static int Probe(void) {
             item[@"refresh_hz"] = @(CGDisplayModeGetRefreshRate(mode)); CFRelease(mode);
         }
         if (screen) {
-            item[@"screen_frame_points"] = Rect(NSRectToCGRect(screen.frame));
-            item[@"visible_frame_points"] = Rect(NSRectToCGRect(screen.visibleFrame));
+            item[@"screen_frame_points"] = NativeRectArray(NSRectToCGRect(screen.frame));
+            item[@"visible_frame_points"] = NativeRectArray(NSRectToCGRect(screen.visibleFrame));
             item[@"backing_scale_factor"] = @(screen.backingScaleFactor);
         }
         [displays addObject:item];
@@ -164,7 +164,7 @@ static int Place(int argc, const char *argv[]) {
     }
     return Emit(@{@"status": verified ? @"placed" : @"placement_unverified", @"target_pid": @(app.processIdentifier),
         @"window_id": @(windowID), @"display_id": @(displayID), @"selector": largest ? @"explicit_largest" : @"explicit_window_id",
-        @"before_bounds_points": Rect(before), @"requested_bounds_points": Rect(requested), @"actual_bounds_points": Rect(actual),
+        @"before_bounds_points": NativeRectArray(before), @"requested_bounds_points": NativeRectArray(requested), @"actual_bounds_points": NativeRectArray(actual),
         @"verified": @(verified)}, verified ? 0 : 2);
 }
 

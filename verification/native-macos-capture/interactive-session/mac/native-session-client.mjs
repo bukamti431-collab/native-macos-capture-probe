@@ -15,6 +15,12 @@ const pause = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 class SessionError extends Error { constructor(code) { super(code); this.code = code; } }
 const requireValue = (condition, code = 'invalid_configuration') => { if (!condition) throw new SessionError(code); };
 
+function validPassword(value) {
+  return typeof value === 'string' && value.length > 0 && [...value].length <= 512
+    && Buffer.byteLength(value, 'utf8') <= 2048 && !/[\r\n\0]/.test(value)
+    && Buffer.from(value, 'utf8').toString('utf8') === value;
+}
+
 function base64(value, bytes, limit = MAX_ENVELOPE_BYTES) {
   requireValue(typeof value === 'string' && value.length <= limit && /^[A-Za-z0-9+/]*={0,2}$/.test(value), 'invalid_envelope');
   const data = Buffer.from(value, 'base64');
@@ -33,7 +39,9 @@ export function loadConfiguration(env) {
     requireValue(endpoint.protocol === 'https:' && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash
       && endpoint.pathname === '/' && (!endpoint.port || endpoint.port === '443'));
     requireValue(typeof env.NATIVE_TARGET_BOT === 'string' && /^[A-Za-z0-9_]{5,32}$/.test(env.NATIVE_TARGET_BOT));
-    return { key, auth, origin: endpoint.origin, targetBot: env.NATIVE_TARGET_BOT,
+    const telegramPassword = env.NATIVE_TELEGRAM_PASSWORD === '' ? undefined : env.NATIVE_TELEGRAM_PASSWORD;
+    requireValue(telegramPassword === undefined || validPassword(telegramPassword));
+    return { key, auth, origin: endpoint.origin, targetBot: env.NATIVE_TARGET_BOT, telegramPassword,
       intervalMs: 5000, durationMs: MAX_DURATION_MS, httpTimeoutMs: 4000, nativeTimeoutMs: 4000,
       maxConsecutiveFailures: 3, retryDelayMs: 100 };
   } catch { throw new SessionError('invalid_configuration'); }
@@ -128,6 +136,7 @@ export async function runSession(config, { nativeAdapter, fetchImpl = globalThis
   const deadline = performance.now() + Math.min(config.durationMs, MAX_DURATION_MS);
   const remaining = () => Math.max(0, deadline - performance.now());
   let seq = 0, frames = 0, failures = 0, targetOpened = false, state = 'awaiting_user';
+  let passwordAttempted = false, nativeAuthStatus;
   const event = value => { try { onEvent(value); } catch {} };
   const nativeOperation = async operation => {
     const controller = new AbortController();
@@ -138,6 +147,9 @@ export async function runSession(config, { nativeAdapter, fetchImpl = globalThis
     const cycleStarted = performance.now(); let category = 'native_unavailable';
     try {
       const capture = await nativeOperation(signal => nativeAdapter.captureFrame({ signal }));
+      capture.window_probe = { ...capture.window_probe };
+      delete capture.window_probe.native_auth_status;
+      if (nativeAuthStatus) capture.window_probe.native_auth_status = nativeAuthStatus;
       const frame = framePayload(capture, ++seq, state);
       const body = JSON.stringify(encryptPayload(frame, config.key));
       requireValue(Buffer.byteLength(body) <= MAX_ENVELOPE_BYTES, 'native_unavailable');
@@ -147,6 +159,19 @@ export async function runSession(config, { nativeAdapter, fetchImpl = globalThis
       const command = await request(config, '/api/command', 'GET', undefined, fetchImpl, remaining);
       if (!['wait', 'open_target', 'finish'].includes(command.action)) return { reason: 'invalid_command', frames };
       if (command.action === 'finish') return { reason: 'finished', frames };
+      if (config.telegramPassword !== undefined && !passwordAttempted) {
+        passwordAttempted = true; // Set before every native call, including a synchronous failure.
+        nativeAuthStatus = 'unavailable';
+        try {
+          requireValue(validPassword(config.telegramPassword) && Number.isSafeInteger(capture.window_probe.target_pid)
+            && capture.window_probe.target_pid > 0, 'native_unavailable');
+          const status = await nativeOperation(signal => nativeAdapter.submitPasswordIfVisible(
+            capture.window_probe.target_pid, config.telegramPassword, { signal }));
+          if (status === 'not_visible') { nativeAuthStatus = 'not_visible'; passwordAttempted = false; }
+          else if (status === 'submitted') { nativeAuthStatus = 'submitted'; event({ event: 'password_submitted' }); }
+          else event({ event: 'password_entry_unavailable' });
+        } catch { event({ event: 'password_entry_unavailable' }); }
+      }
       if (command.action === 'open_target' && !targetOpened) {
         category = 'native_unavailable';
         await nativeOperation(signal => nativeAdapter.openTarget(config.targetBot, { signal }));
@@ -164,15 +189,43 @@ export async function runSession(config, { nativeAdapter, fetchImpl = globalThis
   return { reason: 'expired', frames };
 }
 
+export async function submitPasswordUsingHelper({ app, pid, password, authHelper, invoke, verifyHelper, signal }) {
+  try {
+    requireValue(validPassword(password) && Number.isSafeInteger(pid) && pid > 0, 'native_unavailable');
+    await verifyHelper();
+    const parse = result => {
+      const data = JSON.parse(result.stdout);
+      requireValue(typeof data.password_entry_visible === 'boolean' && typeof data.submitted === 'boolean', 'native_unavailable');
+      requireValue(data.accessibility_trusted === true && data.expected_app_running === true && data.frontmost_verified === true, 'native_unavailable');
+      return data;
+    };
+    const probe = parse(await invoke(authHelper, [app, String(pid), 'probe'], signal));
+    if (probe.password_entry_visible === false && probe.submitted === false) return 'not_visible';
+    requireValue(probe.password_entry_visible === true && probe.submitted === false, 'native_unavailable');
+    const result = parse(await invoke(authHelper, [app, String(pid), 'submit'], signal, JSON.stringify({ password })));
+    return result.password_entry_visible === true && result.submitted === true ? 'submitted' : 'unavailable';
+  } catch { return 'unavailable'; }
+}
+
 export async function createNativeAdapter(env) {
   requireValue(process.platform === 'darwin' && env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted', 'unsupported_host');
   requireValue(typeof env.RUNNER_TEMP === 'string' && path.isAbsolute(env.RUNNER_TEMP));
   const work = path.join(await realpath(env.RUNNER_TEMP), 'native-macos-capture', 'work');
   const app = path.join(work, 'Telegram.app'), helper = path.join(work, 'window_probe'), screenshot = path.join(work, 'private-session-window.png');
+  const authHelper = path.join(work, 'auth_input');
   for (const item of [work, app, helper]) requireValue(await realpath(item) === item, 'native_unavailable');
   requireValue((await lstat(app)).isDirectory() && (await lstat(helper)).isFile(), 'native_unavailable');
-  const invoke = async (executable, args, signal) => {
-    try { return await execFile(executable, args, { signal, encoding: 'utf8', timeout: 3500, maxBuffer: 128 * 1024, windowsHide: true }); }
+  const invoke = async (executable, args, signal, input) => {
+    try {
+      const options = { signal, encoding: 'utf8', timeout: 3500, maxBuffer: 128 * 1024, windowsHide: true };
+      if (input === undefined) return await execFile(executable, args, options);
+      return await new Promise((resolve, reject) => {
+        const child = execFileCallback(executable, args, options, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
+        if (!child.stdin) { reject(new SessionError('native_unavailable')); return; }
+        child.stdin.on('error', () => {});
+        child.stdin.end(input, 'utf8');
+      });
+    }
     catch { throw new SessionError('native_unavailable'); }
   };
   return {
@@ -187,6 +240,10 @@ export async function createNativeAdapter(env) {
     async openTarget(bot, { signal } = {}) {
       requireValue(/^[A-Za-z0-9_]{5,32}$/.test(bot), 'invalid_command');
       await invoke('/usr/bin/open', ['-a', app, `tg://resolve?domain=${bot}`], signal);
+    },
+    async submitPasswordIfVisible(pid, password, { signal } = {}) {
+      return submitPasswordUsingHelper({ app, pid, password, authHelper, invoke, signal,
+        verifyHelper: async () => requireValue(await realpath(authHelper) === authHelper && (await lstat(authHelper)).isFile(), 'native_unavailable') });
     }
   };
 }
