@@ -69,8 +69,9 @@ static int Probe(void) {
         NSMutableDictionary *item = [@{
             @"display_id": @(displayID), @"model_number": @(CGDisplayModelNumber(displayID)),
             @"vendor_number": @(CGDisplayVendorNumber(displayID)),
-            @"online": @(CGDisplayIsOnline(displayID) != 0), @"active": @(CGDisplayIsActive(displayID) != 0),
-            @"mirrored": @(CGDisplayIsInMirrorSet(displayID) != 0),
+            @"online": CGDisplayIsOnline(displayID) ? @YES : @NO,
+            @"active": CGDisplayIsActive(displayID) ? @YES : @NO,
+            @"mirrored": CGDisplayIsInMirrorSet(displayID) ? @YES : @NO,
             @"bounds_points": NativeRectArray(CGDisplayBounds(displayID)),
             @"framebuffer_pixels": @[@(CGDisplayPixelsWide(displayID)), @(CGDisplayPixelsHigh(displayID))]
         } mutableCopy];
@@ -87,8 +88,8 @@ static int Probe(void) {
         [displays addObject:item];
     }
     return Emit(@{@"schema_version": @1, @"status": @"observed", @"probe_pid": @(getpid()),
-        @"screen_capture_preflight": @(CGPreflightScreenCaptureAccess()),
-        @"accessibility_trusted": @(AXIsProcessTrusted()), @"displays": displays}, 0);
+        @"screen_capture_preflight": CGPreflightScreenCaptureAccess() ? @YES : @NO,
+        @"accessibility_trusted": AXIsProcessTrusted() ? @YES : @NO, @"displays": displays}, 0);
 }
 
 static int Place(int argc, const char *argv[]) {
@@ -165,7 +166,7 @@ static int Place(int argc, const char *argv[]) {
     return Emit(@{@"status": verified ? @"placed" : @"placement_unverified", @"target_pid": @(app.processIdentifier),
         @"window_id": @(windowID), @"display_id": @(displayID), @"selector": largest ? @"explicit_largest" : @"explicit_window_id",
         @"before_bounds_points": NativeRectArray(before), @"requested_bounds_points": NativeRectArray(requested), @"actual_bounds_points": NativeRectArray(actual),
-        @"verified": @(verified)}, verified ? 0 : 2);
+        @"verified": verified ? @YES : @NO}, verified ? 0 : 2);
 }
 
 int main(int argc, const char *argv[]) {

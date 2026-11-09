@@ -21,6 +21,12 @@ function validPassword(value) {
     && Buffer.from(value, 'utf8').toString('utf8') === value;
 }
 
+function displayIdentifier(value) {
+  if (value === undefined || value === '') return undefined;
+  requireValue(typeof value === 'string' && /^[1-9][0-9]{0,9}$/.test(value) && Number(value) <= 0xffffffff);
+  return Number(value);
+}
+
 function base64(value, bytes, limit = MAX_ENVELOPE_BYTES) {
   requireValue(typeof value === 'string' && value.length <= limit && /^[A-Za-z0-9+/]*={0,2}$/.test(value), 'invalid_envelope');
   const data = Buffer.from(value, 'base64');
@@ -41,7 +47,7 @@ export function loadConfiguration(env) {
     requireValue(typeof env.NATIVE_TARGET_BOT === 'string' && /^[A-Za-z0-9_]{5,32}$/.test(env.NATIVE_TARGET_BOT));
     const telegramPassword = env.NATIVE_TELEGRAM_PASSWORD === '' ? undefined : env.NATIVE_TELEGRAM_PASSWORD;
     requireValue(telegramPassword === undefined || validPassword(telegramPassword));
-    return { key, auth, origin: endpoint.origin, targetBot: env.NATIVE_TARGET_BOT, telegramPassword,
+    return { key, auth, origin: endpoint.origin, targetBot: env.NATIVE_TARGET_BOT, telegramPassword, displayId: displayIdentifier(env.NATIVE_DISPLAY_ID),
       intervalMs: 5000, durationMs: MAX_DURATION_MS, httpTimeoutMs: 4000, nativeTimeoutMs: 4000,
       maxConsecutiveFailures: 3, retryDelayMs: 100 };
   } catch { throw new SessionError('invalid_configuration'); }
@@ -207,17 +213,46 @@ export async function submitPasswordUsingHelper({ app, pid, password, authHelper
   } catch { return 'unavailable'; }
 }
 
+export function nativeChildEnvironment(env) {
+  return Object.fromEntries(Object.keys(env).filter(name => !name.startsWith('NATIVE_')).map(name => [name, env[name]]));
+}
+
+export function createWindowPlacement({ app, displayId, displayHelper, verifyHelper, invoke, inspect }) {
+  requireValue(displayId === undefined || (Number.isInteger(displayId) && displayId > 0 && displayId <= 0xffffffff));
+  const attempted = new Set();
+  return async (probe, { signal } = {}) => {
+    requireValue(probe?.bundle_identifier === BUNDLE && probe.expected_application_running === true
+      && probe.frontmost_bundle_identifier === BUNDLE && Number.isSafeInteger(probe.window_id)
+      && probe.window_id > 0 && probe.window_id <= 0xffffffff, 'native_unavailable');
+    if (displayId === undefined || attempted.has(probe.window_id)) return probe;
+    attempted.add(probe.window_id);
+    try {
+      await verifyHelper();
+      await invoke(displayHelper, ['place-telegram', app, String(displayId), '--window-id', String(probe.window_id)], signal, undefined, 1200);
+    } catch {} // Placement failure never turns into a resolution claim or another selector.
+    try {
+      const current = await inspect(signal);
+      requireValue(current?.window_id === probe.window_id && current.target_pid === probe.target_pid
+        && current.bundle_identifier === BUNDLE && current.expected_application_running === true
+        && current.frontmost_bundle_identifier === BUNDLE, 'native_unavailable');
+      return current;
+    } catch { return probe; }
+  };
+}
+
 export async function createNativeAdapter(env) {
   requireValue(process.platform === 'darwin' && env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted', 'unsupported_host');
   requireValue(typeof env.RUNNER_TEMP === 'string' && path.isAbsolute(env.RUNNER_TEMP));
   const work = path.join(await realpath(env.RUNNER_TEMP), 'native-macos-capture', 'work');
   const app = path.join(work, 'Telegram.app'), helper = path.join(work, 'window_probe'), screenshot = path.join(work, 'private-session-window.png');
   const authHelper = path.join(work, 'auth_input');
+  const displayHelper = path.join(work, 'display', 'native-display'), displayId = displayIdentifier(env.NATIVE_DISPLAY_ID);
+  const childEnvironment = nativeChildEnvironment(env);
   for (const item of [work, app, helper]) requireValue(await realpath(item) === item, 'native_unavailable');
   requireValue((await lstat(app)).isDirectory() && (await lstat(helper)).isFile(), 'native_unavailable');
-  const invoke = async (executable, args, signal, input) => {
+  const invoke = async (executable, args, signal, input, timeoutMs = 3500) => {
     try {
-      const options = { signal, encoding: 'utf8', timeout: 3500, maxBuffer: 128 * 1024, windowsHide: true };
+      const options = { env: childEnvironment, signal, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 128 * 1024, windowsHide: true };
       if (input === undefined) return await execFile(executable, args, options);
       return await new Promise((resolve, reject) => {
         const child = execFileCallback(executable, args, options, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
@@ -228,11 +263,18 @@ export async function createNativeAdapter(env) {
     }
     catch { throw new SessionError('native_unavailable'); }
   };
+  const inspectWindow = async signal => {
+    let probe; try { probe = JSON.parse((await invoke(helper, [app, 'inspect'], signal)).stdout); } catch { throw new SessionError('native_unavailable'); }
+    requireValue(probe.bundle_identifier === BUNDLE && probe.expected_application_running === true && probe.frontmost_bundle_identifier === BUNDLE
+      && Number.isSafeInteger(probe.window_id) && probe.window_id > 0, 'native_unavailable');
+    return probe;
+  };
+  const placeWindow = createWindowPlacement({ app, displayId, displayHelper, invoke, inspect: inspectWindow,
+    verifyHelper: async () => requireValue(await realpath(displayHelper) === displayHelper && (await lstat(displayHelper)).isFile(), 'native_unavailable') });
   return {
     async captureFrame({ signal } = {}) {
-      let probe; try { probe = JSON.parse((await invoke(helper, [app, 'inspect'], signal)).stdout); } catch { throw new SessionError('native_unavailable'); }
-      requireValue(probe.bundle_identifier === BUNDLE && probe.expected_application_running === true && probe.frontmost_bundle_identifier === BUNDLE
-        && Number.isSafeInteger(probe.window_id) && probe.window_id > 0, 'native_unavailable');
+      let probe = await inspectWindow(signal);
+      probe = await placeWindow(probe, { signal });
       await invoke('/usr/sbin/screencapture', ['-x', '-o', '-l', String(probe.window_id), screenshot], signal);
       const info = await lstat(screenshot); requireValue(info.isFile() && info.size <= MAX_PNG_BYTES, 'native_unavailable');
       return { window_probe: probe, png: await readFile(screenshot) };
